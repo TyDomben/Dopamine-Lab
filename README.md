@@ -143,6 +143,7 @@ The RNG was decided instantly. The delay and percentage are pure manipulation.
 - **Web Audio API** for sound synthesis
 - **LocalStorage** for persistence
 - **Custom drag-and-drop** circuit builder
+- **Comprehensive validation system** (see SECURITY.md)
 
 ### Performance
 
@@ -151,6 +152,23 @@ The RNG was decided instantly. The delay and percentage are pure manipulation.
 - Sound triggers debounced (max 10/sec)
 - Lazy loading for prestige content
 - Hardware-accelerated animations
+
+### Security & Anti-Exploit
+
+HOOKED is designed to be **unbreakable**. See [SECURITY.md](SECURITY.md) for full details.
+
+```
+✓ Resource validation (prevents overflow/NaN/Infinity)
+✓ Node limits (100 max, prevents performance death)
+✓ Connection validation (no infinite loops)
+✓ Rate limiting (prevents autoclickers)
+✓ Time manipulation protection
+✓ Prestige validation (prevents spam)
+✓ Anti-cheat detection system
+✓ Save file integrity checks
+```
+
+**Go ahead, try to break it.** The game is watching. 👁️
 
 ## 🚀 Getting Started
 

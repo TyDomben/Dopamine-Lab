@@ -4,6 +4,20 @@ import { ResourceManager } from '../systems/resources/ResourceManager';
 import { NODE_DEFINITIONS } from '../data/nodes';
 import { soundEngine } from '../systems/audio/SoundEngine';
 import { generateId } from '../utils/format';
+import {
+  LIMITS,
+  validateGameState,
+  validateDeltaTime,
+  validatePosition,
+  validateResources,
+  isValidConnection,
+  isValidNodePlacement,
+  detectFeedbackLoops,
+  canPrestigeSafely,
+  sanitizeResourceGain,
+  rateLimiter,
+  antiCheat,
+} from '../systems/validation/GameValidator';
 
 // Initial game state
 const createInitialState = (): GameState => ({
@@ -71,14 +85,18 @@ type GameAction =
 const gameReducer = (state: GameState, action: GameAction): GameState => {
   switch (action.type) {
     case 'TICK': {
-      const deltaTime = action.deltaTime;
+      // Validate and cap delta time (prevents time manipulation)
+      const deltaTime = validateDeltaTime(action.deltaTime);
 
       // Update resources based on rates
-      const newResources = ResourceManager.updateResources(
+      let newResources = ResourceManager.updateResources(
         state.resources,
         state.resourceRates,
         deltaTime
       );
+
+      // Validate resources (prevents overflow/NaN)
+      newResources = validateResources(newResources);
 
       // Update analytics
       const sessionTime = Date.now() - state.analytics.sessionStartTime;
@@ -145,7 +163,28 @@ const gameReducer = (state: GameState, action: GameAction): GameState => {
     }
 
     case 'ADD_NODE': {
+      // Rate limit node placement (prevents spam)
+      if (!rateLimiter.canPerformAction('ADD_NODE', LIMITS.MAX_NODE_PLACEMENTS_PER_SECOND)) {
+        antiCheat.reportSuspiciousActivity('NODE_SPAM', 2);
+        return state;
+      }
+
+      // Check node limit (prevents performance death)
+      if (state.nodes.length >= LIMITS.MAX_NODES) {
+        console.warn('[LIMIT] Maximum nodes reached:', LIMITS.MAX_NODES);
+        return state;
+      }
+
       const definition = NODE_DEFINITIONS[action.nodeType];
+
+      // Validate and clamp position
+      const position = validatePosition(action.position.x, action.position.y);
+
+      // Check node spacing (prevents overlap exploits)
+      if (!isValidNodePlacement(position.x, position.y, state.nodes)) {
+        console.warn('[VALIDATION] Node placement too close to existing node');
+        return state;
+      }
 
       // Check if can afford
       if (!ResourceManager.canAfford(state.resources, definition.cost)) {
@@ -156,7 +195,7 @@ const gameReducer = (state: GameState, action: GameAction): GameState => {
       const newNode: Node = {
         id: generateId(),
         type: action.nodeType,
-        position: action.position,
+        position,
         tier: definition.tier,
         level: 1,
         connections: [],
@@ -174,7 +213,7 @@ const gameReducer = (state: GameState, action: GameAction): GameState => {
       return {
         ...state,
         nodes: [...state.nodes, newNode],
-        resources: newResources,
+        resources: validateResources(newResources),
       };
     }
 
@@ -203,12 +242,25 @@ const gameReducer = (state: GameState, action: GameAction): GameState => {
 
       if (!fromNode || !toNode) return state;
 
-      // Check if connection already exists
-      const existingConnection = state.connections.find(
-        c => c.from === action.fromId && c.to === action.toId
+      // Validate connection (prevents exploits)
+      const validation = isValidConnection(
+        action.fromId,
+        action.toId,
+        state.connections,
+        state.nodes
       );
 
-      if (existingConnection) return state;
+      if (!validation.valid) {
+        console.warn('[VALIDATION] Invalid connection:', validation.reason);
+        return state;
+      }
+
+      // Check for excessive feedback loops (prevents infinite recursion exploits)
+      const currentLoops = detectFeedbackLoops(state.connections);
+      if (currentLoops >= LIMITS.MAX_FEEDBACK_LOOPS) {
+        console.warn('[LIMIT] Too many feedback loops:', currentLoops);
+        return state;
+      }
 
       const newConnection: Connection = {
         id: generateId(),
@@ -235,6 +287,12 @@ const gameReducer = (state: GameState, action: GameAction): GameState => {
     }
 
     case 'UNLOCK_NODE': {
+      // Rate limit unlocks (prevents rapid unlock spam)
+      if (!rateLimiter.canPerformAction('UNLOCK_NODE', LIMITS.MAX_UNLOCKS_PER_SECOND)) {
+        antiCheat.reportSuspiciousActivity('UNLOCK_SPAM', 1);
+        return state;
+      }
+
       if (state.unlockedNodes.includes(action.nodeType)) {
         return state;
       }
@@ -268,24 +326,38 @@ const gameReducer = (state: GameState, action: GameAction): GameState => {
         return state;
       }
 
+      // Validate prestige (prevents spam and exploits)
+      const lastPrestige = state.lastTickTime; // Use last tick as proxy for last action
+      const prestigeValidation = canPrestigeSafely(state, lastPrestige);
+
+      if (!prestigeValidation.allowed) {
+        console.warn('[VALIDATION] Prestige denied:', prestigeValidation.reason);
+        antiCheat.reportSuspiciousActivity('PRESTIGE_SPAM', 3);
+        return state;
+      }
+
       const prestigeGain = ResourceManager.calculatePrestigeGain(state.resources);
 
       soundEngine.playPrestige();
 
       // Reset state but keep prestige bonuses
       const newState = createInitialState();
+
+      // Validate multipliers (prevents exponential exploits)
+      const newMultipliers = {
+        production: Math.min(state.permanentMultipliers.production * 1.5, LIMITS.MAX_MULTIPLIER),
+        unlockSpeed: Math.min(state.permanentMultipliers.unlockSpeed * 1.3, LIMITS.MAX_MULTIPLIER),
+        awareness: Math.min(state.permanentMultipliers.awareness * 1.2, LIMITS.MAX_MULTIPLIER),
+      };
+
       return {
         ...newState,
-        prestigeLevel: state.prestigeLevel + 1,
+        prestigeLevel: Math.min(state.prestigeLevel + 1, LIMITS.MAX_PRESTIGE_LEVEL),
         resources: {
           ...newState.resources,
           'prestige-tokens': state.resources['prestige-tokens'] + prestigeGain,
         },
-        permanentMultipliers: {
-          production: state.permanentMultipliers.production * 1.5,
-          unlockSpeed: state.permanentMultipliers.unlockSpeed * 1.3,
-          awareness: state.permanentMultipliers.awareness * 1.2,
-        },
+        permanentMultipliers: newMultipliers,
         analytics: {
           ...newState.analytics,
           prestigeCount: state.analytics.prestigeCount + 1,
@@ -318,8 +390,14 @@ const gameReducer = (state: GameState, action: GameAction): GameState => {
     }
 
     case 'ADD_RESOURCES': {
-      const newResources = ResourceManager.add(state.resources, action.resources);
-      soundEngine.playResourceGain(action.resources.dopamine || 0);
+      // Sanitize resource gains (prevents injection exploits)
+      const sanitizedGains = sanitizeResourceGain(action.resources);
+
+      // Add resources with validation
+      let newResources = ResourceManager.add(state.resources, sanitizedGains);
+      newResources = validateResources(newResources);
+
+      soundEngine.playResourceGain(sanitizedGains.dopamine || 0);
 
       return {
         ...state,
@@ -328,9 +406,21 @@ const gameReducer = (state: GameState, action: GameAction): GameState => {
     }
 
     case 'TRACK_CLICK': {
+      // Rate limit clicks (prevents autoclicker exploits)
+      if (!rateLimiter.canPerformAction('TRACK_CLICK', LIMITS.MAX_CLICKS_PER_SECOND)) {
+        antiCheat.reportSuspiciousActivity('CLICK_SPAM', 2);
+        return state;
+      }
+
       const clickCount = state.analytics.clickCount + 1;
       const sessionTime = (Date.now() - state.analytics.sessionStartTime) / 1000 / 60;
       const apm = sessionTime > 0 ? clickCount / sessionTime : 0;
+
+      // Detect suspicious APM (autoclicker detection)
+      if (apm > 120) {
+        antiCheat.reportSuspiciousActivity('SUSPICIOUS_APM', 3);
+        console.warn('[ANTI-CHEAT] Suspicious APM detected:', apm);
+      }
 
       return {
         ...state,
@@ -344,7 +434,16 @@ const gameReducer = (state: GameState, action: GameAction): GameState => {
     }
 
     case 'LOAD_STATE': {
-      return action.state;
+      // Validate loaded state (prevents save file exploits)
+      console.log('[LOAD] Validating loaded state...');
+      const validatedState = validateGameState(action.state);
+
+      // Check for tampering
+      if (antiCheat.isLikelyCheating()) {
+        console.warn('[ANTI-CHEAT] Suspicious activity detected in loaded state');
+      }
+
+      return validatedState;
     }
 
     default:
@@ -352,9 +451,22 @@ const gameReducer = (state: GameState, action: GameAction): GameState => {
   }
 };
 
+// Wrapper reducer with final validation pass
+const validatedGameReducer = (state: GameState, action: GameAction): GameState => {
+  const newState = gameReducer(state, action);
+
+  // Final validation pass (safety net)
+  if (action.type !== 'LOAD_STATE') {
+    // Don't double-validate LOAD_STATE
+    return validateGameState(newState);
+  }
+
+  return newState;
+};
+
 // Main hook
 export const useGameState = () => {
-  const [state, dispatch] = useReducer(gameReducer, createInitialState());
+  const [state, dispatch] = useReducer(validatedGameReducer, createInitialState());
   const frameRef = useRef<number | undefined>(undefined);
   const lastFrameTime = useRef<number>(Date.now());
 
