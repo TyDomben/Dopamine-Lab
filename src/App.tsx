@@ -5,6 +5,7 @@ import { ResourceDisplay } from './components/ui/ResourceDisplay';
 import { CircuitCanvas } from './components/game/CircuitCanvas';
 import { NodePalette } from './components/game/NodePalette';
 import { AnalyticsDashboard } from './components/game/AnalyticsDashboard';
+import { UIControls } from './components/ui/UIControls';
 import { soundEngine } from './systems/audio/SoundEngine';
 import { ResourceManager } from './systems/resources/ResourceManager';
 import { formatNumber } from './utils/format';
@@ -13,6 +14,14 @@ function App() {
   const { state, actions } = useGameState();
   const [showWelcome, setShowWelcome] = useState(true);
   const [particles, setParticles] = useState<Array<{ id: number; x: number; y: number }>>([]);
+
+  // UI control state
+  const [zoom, setZoom] = useState(1.0);
+  const [panX, setPanX] = useState(0);
+  const [panY, setPanY] = useState(0);
+  const [showPalette, setShowPalette] = useState(true);
+  const [showAnalytics, setShowAnalytics] = useState(true);
+  const [showHeader, setShowHeader] = useState(true);
 
   // Initialize sound engine on first interaction
   useEffect(() => {
@@ -86,6 +95,34 @@ function App() {
     }, 1000);
   };
 
+  // Zoom and pan handlers
+  const handleZoomIn = () => setZoom(prev => Math.min(prev * 1.2, 3.0));
+  const handleZoomOut = () => setZoom(prev => Math.max(prev / 1.2, 0.3));
+  const handleResetZoom = () => setZoom(1.0);
+
+  const handleCenterView = () => {
+    if (state.nodes.length === 0) {
+      setPanX(0);
+      setPanY(0);
+      return;
+    }
+
+    // Calculate center of all nodes
+    const avgX = state.nodes.reduce((sum, node) => sum + node.position.x, 0) / state.nodes.length;
+    const avgY = state.nodes.reduce((sum, node) => sum + node.position.y, 0) / state.nodes.length;
+
+    // Center on that point
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    setPanX(viewportWidth / 2 - avgX * zoom);
+    setPanY(viewportHeight / 2 - avgY * zoom);
+  };
+
+  const handlePan = (x: number, y: number) => {
+    setPanX(x);
+    setPanY(y);
+  };
+
   const canPrestige = ResourceManager.canPrestige(state.resources);
   const prestigeGain = ResourceManager.calculatePrestigeGain(state.resources);
 
@@ -135,55 +172,59 @@ function App() {
       </AnimatePresence>
 
       {/* Header */}
-      <div className="absolute top-0 left-0 right-0 z-40 p-4 bg-gradient-to-b from-black/50 to-transparent">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-4">
-            <h1 className="text-3xl font-bold text-game-cyan">HOOKED</h1>
-            <div className="text-sm text-gray-400">
-              Phase: <span className="text-game-purple font-bold uppercase">{state.phase}</span>
+      {showHeader && (
+        <div className="absolute top-0 left-0 right-0 z-40 p-4 bg-gradient-to-b from-black/50 to-transparent">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-4">
+              <h1 className="text-3xl font-bold text-game-cyan">HOOKED</h1>
+              <div className="text-sm text-gray-400">
+                Phase: <span className="text-game-purple font-bold uppercase">{state.phase}</span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-4">
+              {/* Awareness toggle */}
+              <button
+                className={`px-4 py-2 rounded-lg font-bold transition-all ${
+                  state.awarenessMode
+                    ? 'bg-game-gold text-black'
+                    : 'bg-gray-700 text-gray-300'
+                }`}
+                onClick={actions.toggleAwareness}
+              >
+                🧠 Awareness: {state.awarenessMode ? 'ON' : 'OFF'}
+              </button>
+
+              {/* Prestige button */}
+              {canPrestige && (
+                <motion.button
+                  className="px-6 py-2 bg-game-gold text-black font-bold rounded-lg"
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={actions.prestige}
+                  animate={{ scale: [1, 1.1, 1] }}
+                  transition={{ duration: 1, repeat: Infinity }}
+                >
+                  ⭐ PRESTIGE (+{prestigeGain} tokens)
+                </motion.button>
+              )}
             </div>
           </div>
 
-          <div className="flex items-center gap-4">
-            {/* Awareness toggle */}
-            <button
-              className={`px-4 py-2 rounded-lg font-bold transition-all ${
-                state.awarenessMode
-                  ? 'bg-game-gold text-black'
-                  : 'bg-gray-700 text-gray-300'
-              }`}
-              onClick={actions.toggleAwareness}
-            >
-              🧠 Awareness: {state.awarenessMode ? 'ON' : 'OFF'}
-            </button>
-
-            {/* Prestige button */}
-            {canPrestige && (
-              <motion.button
-                className="px-6 py-2 bg-game-gold text-black font-bold rounded-lg"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={actions.prestige}
-                animate={{ scale: [1, 1.1, 1] }}
-                transition={{ duration: 1, repeat: Infinity }}
-              >
-                ⭐ PRESTIGE (+{prestigeGain} tokens)
-              </motion.button>
-            )}
-          </div>
+          {/* Resource display */}
+          <ResourceDisplay resources={state.resources} rates={state.resourceRates} compact />
         </div>
-
-        {/* Resource display */}
-        <ResourceDisplay resources={state.resources} rates={state.resourceRates} compact />
-      </div>
+      )}
 
       {/* Node palette */}
-      <NodePalette
-        unlockedNodes={state.unlockedNodes}
-        resources={state.resources}
-        awarenessMode={state.awarenessMode}
-        onAddNode={handleAddNode}
-      />
+      {showPalette && (
+        <NodePalette
+          unlockedNodes={state.unlockedNodes}
+          resources={state.resources}
+          awarenessMode={state.awarenessMode}
+          onAddNode={handleAddNode}
+        />
+      )}
 
       {/* Circuit canvas */}
       <CircuitCanvas
@@ -195,14 +236,21 @@ function App() {
         onSelectNode={actions.selectNode}
         onHoverNode={actions.hoverNode}
         onNodeMove={handleNodeMove}
+        zoom={zoom}
+        panX={panX}
+        panY={panY}
+        onPan={handlePan}
+        onZoom={setZoom}
       />
 
       {/* Analytics dashboard */}
-      <AnalyticsDashboard
-        analytics={state.analytics}
-        visible={state.showAnalyticsDashboard}
-        awarenessMode={state.awarenessMode}
-      />
+      {showAnalytics && (
+        <AnalyticsDashboard
+          analytics={state.analytics}
+          visible={state.showAnalyticsDashboard}
+          awarenessMode={state.awarenessMode}
+        />
+      )}
 
       {/* Tutorial overlay */}
       {!state.tutorialCompleted && state.nodes.length === 0 && (
@@ -285,6 +333,21 @@ function App() {
           You know what this is. Why are you still here?
         </div>
       )}
+
+      {/* UI Controls */}
+      <UIControls
+        showPalette={showPalette}
+        showAnalytics={showAnalytics}
+        showHeader={showHeader}
+        onTogglePalette={() => setShowPalette(prev => !prev)}
+        onToggleAnalytics={() => setShowAnalytics(prev => !prev)}
+        onToggleHeader={() => setShowHeader(prev => !prev)}
+        onCenterView={handleCenterView}
+        onZoomIn={handleZoomIn}
+        onZoomOut={handleZoomOut}
+        onResetZoom={handleResetZoom}
+        zoom={zoom}
+      />
     </div>
   );
 }
